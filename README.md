@@ -67,5 +67,5 @@ answer "Who am I?" in a pretty convincing way.
 
 ## License
 
-This project is licensed under the [MIT license](https://github.com/dylanwh/horse-npc/blob/main/LICENSE.md)
+This project is licensed under the [MIT license](https://github.com/dylanwh/horse-npc/blob/main/LICENSE)
 
