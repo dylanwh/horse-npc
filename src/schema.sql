@@ -1,12 +1,11 @@
-CREATE TABLE IF NOT EXISTS personalities (
+CREATE TABLE IF NOT EXISTS conversation (
     id     INTEGER PRIMARY KEY,
-    name   VARCHAR(255) NOT NULL UNIQUE,
-    prompt TEXT NOT NULL
+    name   VARCHAR(255) NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS history (
    id             INTEGER PRIMARY KEY,
-   personality    INTEGER NOT NULL REFERENCES personality(id),
+   conversation   INTEGER NOT NULL REFERENCES conversation(id),
    role           INTEGER NOT NULL,
    content        TEXT NOT NULL
 );
