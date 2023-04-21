@@ -1,61 +1,83 @@
-use crate::schema::{Message, Personality, Role, Schema};
+mod db;
+
 use async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs,
 };
+use bimap::BiMap;
 use eyre::{ContextCompat, Result};
+use serenity::model::prelude::Message;
 use serenity::{
     model::{channel::Channel, prelude::Ready},
     prelude::*,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
+// use tiktoken_rs::async_openai::get_chat_completion_max_tokens;
+// use minijinja::EnvirVonment;
 
-mod schema;
-
-// currently unused again, the current system prompt is dynamically generated so that HorseNPC can tell time and who is talking to it.
-const HORSE_NPC_PROMPT: &str = include_str!("../system_prompt.txt");
 const HORSE_MODERATION_RESPONSES: &str = include_str!("../moderation_responses.txt");
 
 struct Handler {
-    schema: Schema,
+    schema: db::Schema,
     openai: Arc<async_openai::Client>,
-    personalities: Arc<Mutex<HashMap<String, Personality>>>,
+    mentions: Arc<Mutex<BiMap<String, String>>>,
+    model: String,
+    max_tokens: u16,
 }
 
 impl Handler {
     async fn new() -> Result<Self> {
-        let schema = Schema::new(Some(PathBuf::from("horse.db"))).await?;
+        let schema = db::Schema::new(Some(PathBuf::from("horse.db"))).await?;
         let openai = Arc::new(async_openai::Client::new().with_api_key(get_openai_key()?));
-        let mut personalities = HashMap::new();
-        personalities.insert(
-            "horse".to_owned(),
-            schema.define_personality("horse", HORSE_NPC_PROMPT).await?,
-        );
-        let personalities = Arc::new(Mutex::new(personalities));
+        let mentions = Arc::new(Mutex::new(BiMap::new()));
 
         Ok(Self {
             schema,
             openai,
-            personalities,
+            mentions,
+            model: "gpt-3.5-turbo".to_owned(),
+            max_tokens: 256,
         })
     }
+
+    // async fn parse_message(&self, context: &Context, message: &Message) -> Result<()> {
+    //     if message.author.bot {
+    //         return Ok(());
+    //     }
+    //     let messages = vec![
+    //         ChatCompletionRequestMessageArgs::default()
+    //             .role
+    //             .text("Hello, how are you?")
+    //             .build()?,
+    //         ChatCompletionRequestMessageArgs::default()
+    //             .text("I am doing well, thank you.")
+    //             .build()?,
+    //         ChatCompletionRequestMessageArgs::default()
+    //             .text("That is good to hear.")
+    //             .build()?,
+    //     ];
+    //     ]
+    //
+    //
+    //     Ok(())
+    // }
 
     // it actually works out pretty good just leaving the discord references in the message,
     // though I worry since chatgpt isn't good with long numbers it may mix up people eventually. That could actually be amusing though.
     #[allow(dead_code)]
-    async fn replace_user_mentions(
-        &self,
-        context: &Context,
-        message: &serenity::model::prelude::Message,
-    ) -> Result<String> {
+    async fn replace_user_mentions(&self, context: &Context, message: &Message) -> Result<String> {
         let mut content = message.content.clone();
+        let mentions = self.mentions.lock().await;
         for mention in message.mentions.iter() {
             let user = mention.id.to_user(&context).await?;
-            // get guild nickname
-            let guild = message.guild(&context).context("No guild found")?;
-            let member = guild.member(context, user.id).await?;
-            let nickname = member.nick.unwrap_or(user.name);
             let mention = format!("<@{}>", user.id);
-            content = content.replace(&mention, &nickname);
+            if let Some(nickname) = mentions.get_by_left(&mention) {
+                content = content.replace(&mention, nickname);
+            } else {
+                let guild = message.guild(&context).context("No guild found")?;
+                let member = guild.member(context, user.id).await?;
+                let nickname = member.nick.unwrap_or(user.name).to_owned();
+                content = content.replace(&mention.as_str(), &nickname);
+            }
         }
         Ok(content)
     }
@@ -77,14 +99,24 @@ impl Handler {
         Ok(response.results.iter().any(|r| r.flagged))
     }
 
-    async fn current_system_prompt(
+    async fn current_conversation(
         &self,
-        _personality: Personality,
         context: &Context,
-        message: &serenity::model::prelude::Message,
-    ) -> Result<String> {
+        message: &Message,
+    ) -> Result<db::Conversation> {
+        let channel = message.channel_id.to_channel(&context).await?;
+        let name = match channel {
+            Channel::Guild(g) => format!("#{}", g.name),
+            Channel::Private(p) => format!("{}", p.recipient.name),
+            _ => format!("unknown"),
+        };
+
+        Ok(self.schema.new_conversation(name).await?)
+    }
+
+    async fn current_system_prompt(&self, context: &Context, message: &Message) -> Result<String> {
         let now = chrono::Local::now();
-        let date = now.format("Today is %A, the %e of %B, %Y. It is %I:%M %p");
+        let date = now.format("Today is %A, the %e of %B, %Y. The tine is %I:%M %p");
         let user = message.author.id.to_user(&context).await?;
         let channel = message.channel_id.to_channel(&context).await?;
         let discord_name = message
@@ -94,7 +126,7 @@ impl Handler {
 
         let channel_info = match channel {
             Channel::Guild(g) => format!(
-                "in a channel named {}. The topic is: {}",
+                r##"in a channel named {}. The topic is: "{}""##,
                 g.name,
                 g.topic
                     .as_ref()
@@ -125,7 +157,7 @@ impl Handler {
 
     async fn reply(
         &self,
-        personality: Personality,
+        conversation: db::Conversation,
         system_prompt: String,
         message: String,
     ) -> Result<String> {
@@ -133,30 +165,32 @@ impl Handler {
             return Ok(random_moderation_response());
         }
 
-        let system_prompt = Message {
+        let system_prompt = db::Message {
             id: 0,
-            personality,
-            role: Role::System,
+            conversation,
+            role: db::Role::System,
             content: system_prompt,
         };
 
         self.schema
-            .add_message(personality, Role::User, message)
+            .add_message(conversation, db::Role::User, message)
             .await?;
 
         let mut messages = self
             .schema
-            .history(personality, 10)
+            .history(conversation)
             .await?
             .iter()
             .map(|m| Ok(m.try_into()?))
             .collect::<Result<Vec<ChatCompletionRequestMessage>>>()?;
 
-        messages.insert(0, system_prompt.try_into()?);
+        messages.insert(messages.len() - 1, system_prompt.try_into()?);
+
+        // get_chat_completion_max_tokens(
 
         let request = CreateChatCompletionRequestArgs::default()
-            .max_tokens(256u16)
-            .model("gpt-3.5-turbo")
+            .max_tokens(self.max_tokens)
+            .model(&self.model)
             .temperature(0.5)
             .messages(messages)
             .build()?;
@@ -170,7 +204,7 @@ impl Handler {
                 let content = choice.message.content;
                 reply = Some(content.clone());
                 self.schema
-                    .add_message(personality, Role::Assistant, content)
+                    .add_message(conversation, db::Role::Assistant, content)
                     .await?;
             } else {
                 log::warn!("Unexpected choice: {:?}", choice);
@@ -190,26 +224,25 @@ impl Handler {
 
 #[serenity::async_trait]
 impl EventHandler for Handler {
-    async fn message(&self, context: Context, msg: serenity::model::channel::Message) {
+    async fn message(&self, context: Context, msg: Message) {
         if msg.author.bot {
             return;
         }
         let mentioned = msg.mentions_me(&context).await.unwrap_or(false);
-        if mentioned {
-            let personality = self
-                .personalities
-                .lock()
+        let dm = msg.is_private();
+
+        if mentioned || dm {
+            let conversation = self
+                .current_conversation(&context, &msg)
                 .await
-                .get("horse")
-                .expect("didn't find horse personality")
-                .clone();
+                .expect("Failed to get conversation");
             if let Ok(typing) = msg.channel_id.start_typing(&context.http) {
                 let system_prompt = self
-                    .current_system_prompt(personality, &context, &msg)
+                    .current_system_prompt(&context, &msg)
                     .await
                     .expect("failed to get system prompt");
                 let reply = self
-                    .reply(personality, system_prompt, msg.content.clone())
+                    .reply(conversation, system_prompt, msg.content.clone())
                     .await
                     .expect("Failed to reply");
                 log::info!("HorseNPC: {}", reply);

@@ -285,6 +285,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4a4ddaa51a5bc52a6948f74c06d20aaaddb71924eab79b8c97a8c556e942d6a"
 
 [[package]]
+name = "bimap"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,12 +1114,14 @@ name = "horse-npc"
 version = "0.1.0"
 dependencies = [
  "async-openai",
+ "bimap",
  "chrono",
  "clap",
  "env_logger",
  "eyre",
  "keyring",
  "log",
+ "minijinja",
  "rand",
  "reqwest",
  "rpassword",
@@ -1439,6 +1450,15 @@ checksum = "4192263c238a5f0d0c6bfd21f336a313a4ce1c450542449ca191bb657b4642ef"
 dependencies = [
  "mime",
  "unicase",
+]
+
+[[package]]
+name = "minijinja"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98fa85d7cb4708e7978eea66925d1345a80d83e317db2e754240e54cafff14eb"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2361,6 +2381,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb22485be61c6206171beb39fbc39104b31850025296710ff42ae60c1f9123c4"
 dependencies = [
  "anyhow",
+ "async-openai",
  "base64 0.21.0",
  "bstr",
  "fancy-regex",

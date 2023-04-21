@@ -9,13 +9,13 @@ const SCHEMA_SQL: &str = include_str!("schema.sql");
 #[derive(Debug)]
 pub struct Message {
     pub id: i64,
-    pub personality: Personality,
+    pub conversation: Conversation,
     pub role: Role,
     pub content: String,
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
-pub struct Personality(i64);
+pub struct Conversation(i64);
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
 pub enum Role {
@@ -102,41 +102,28 @@ impl Schema {
         Ok(Self { conn })
     }
 
-    pub async fn define_personality<P1, P2>(
-        &self,
-        personality: P1,
-        prompt: P2,
-    ) -> Result<Personality>
+    pub async fn new_conversation<S>(&self, conversation: S) -> Result<Conversation>
     where
-        P1: AsRef<str>,
-        P2: AsRef<str>,
+        S: AsRef<str>,
     {
         let rowid = {
-            let personality = personality.as_ref().to_string();
-            let prompt = prompt.as_ref().to_string();
+            let conversation = conversation.as_ref().to_string();
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "INSERT INTO personalities (name, prompt) VALUES (?1, ?2)
-                ON CONFLICT (name) DO UPDATE SET prompt = ?2",
-                        params![personality, prompt],
+                        "INSERT INTO conversation (name) VALUES (?1)
+                ON CONFLICT (name) DO NOTHING",
+                        params![conversation],
                     )?;
-                    let rowid = conn.last_insert_rowid();
-                    if rowid == 0 {
-                        let mut stmt =
-                            conn.prepare("SELECT id FROM personalities WHERE name = ?1")?;
-                        let mut rows =
-                            stmt.query_map(params![personality], |row| Ok(row.get(0)?))?;
-                        let id = if let Some(row) = rows.next() {
-                            row?
-                        } else {
-                            return Err(rusqlite::Error::QueryReturnedNoRows);
-                        };
-
-                        Ok(id)
+                    let mut stmt = conn.prepare("SELECT id FROM conversation WHERE name = ?1")?;
+                    let mut rows = stmt.query_map(params![conversation], |row| Ok(row.get(0)?))?;
+                    let id = if let Some(row) = rows.next() {
+                        row?
                     } else {
-                        Ok(rowid)
-                    }
+                        return Err(rusqlite::Error::QueryReturnedNoRows);
+                    };
+
+                    Ok(id)
                 })
                 .await?
         };
@@ -145,38 +132,18 @@ impl Schema {
             Ok(rowid)
         } else {
             Err(eyre!(
-                "Failed to insert personality: {}, got row id: {}",
-                personality.as_ref(),
+                "Failed to insert conversation: {}, got row id: {}",
+                conversation.as_ref(),
                 rowid
             ))
         }?;
 
-        Ok(Personality(id))
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_personality_prompt(&self, personality: Personality) -> Result<String> {
-        let personality_id = personality.0;
-        let prompt = self
-            .conn
-            .call(move |conn| {
-                let mut stmt = conn.prepare("SELECT prompt FROM personalities WHERE id = ?1")?;
-                let mut rows = stmt.query_map(params![personality_id], |row| Ok(row.get(0)?))?;
-
-                if let Some(row) = rows.next() {
-                    Ok(row?)
-                } else {
-                    Err(rusqlite::Error::QueryReturnedNoRows)
-                }
-            })
-            .await?;
-
-        Ok(prompt)
+        Ok(Conversation(id))
     }
 
     pub async fn add_message<S>(
         &self,
-        personality: Personality,
+        conversation: Conversation,
         role: Role,
         message: S,
     ) -> Result<()>
@@ -188,8 +155,8 @@ impl Schema {
             .call(move |conn| {
                 let role: u8 = role.into();
                 conn.execute(
-                    "INSERT INTO history (personality, role, content) VALUES (?1, ?2, ?3)",
-                    params![personality.0, role, message],
+                    "INSERT INTO history (conversation, role, content) VALUES (?1, ?2, ?3)",
+                    params![conversation.0, role, message],
                 )
             })
             .await?;
@@ -199,17 +166,16 @@ impl Schema {
 
     const HISTORY_SQL: &'static str = r#"
         SELECT id, role, content FROM history
-        WHERE personality = ?1
+        WHERE conversation = ?1
         ORDER BY id DESC
-        LIMIT ?2
     "#;
 
-    pub async fn history(&self, personality: Personality, limit: usize) -> Result<Vec<Message>> {
+    pub async fn history(&self, conversation: Conversation) -> Result<Vec<Message>> {
         let messages = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(Self::HISTORY_SQL)?;
-                let rows = stmt.query_map(params![personality.0, limit], |row| {
+                let rows = stmt.query_map(params![conversation.0], |row| {
                     let id = row.get(0)?;
                     let role: u8 = row.get(1)?;
 
@@ -221,7 +187,7 @@ impl Schema {
 
                     Ok(Message {
                         id,
-                        personality,
+                        conversation,
                         role,
                         content,
                     })
@@ -247,17 +213,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_personalities() {
+    async fn test_conversation() {
         let schema = Schema::new(None).await.expect("failed to create schema");
-        let personality = schema
-            .define_personality("test", "test prompt")
+        let c1 = schema
+            .new_conversation("test")
             .await
-            .expect("failed to define personality");
-        let prompt = schema
-            .get_personality_prompt(personality)
+            .expect("failed to define conversation");
+        let c2 = schema
+            .new_conversation("test")
             .await
-            .expect("failed to get prompt");
-        assert_eq!(prompt, "test prompt".to_string());
+            .expect("failed to define conversation");
+        assert_eq!(c1, c2);
     }
 
     #[tokio::test]
@@ -284,18 +250,18 @@ mod tests {
     #[tokio::test]
     async fn test_history() {
         let schema = Schema::new(None).await.expect("failed to create schema");
-        let personality = schema
-            .define_personality("test", "test prompt")
+        let conversation = schema
+            .new_conversation("test")
             .await
-            .expect("failed to define personality");
+            .expect("failed to define conversation");
         let role = Role::System;
         let message = "test message";
         schema
-            .add_message(personality, role, message)
+            .add_message(conversation, role, message)
             .await
             .expect("failed to add message");
         let messages = schema
-            .history(personality, 1)
+            .history(conversation)
             .await
             .expect("failed to get history");
         assert_eq!(messages.len(), 1);
