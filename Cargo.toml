@@ -13,11 +13,13 @@ clap = { version = "4.2.2", features = ["derive"] }
 dotenv = "0.15.0"
 env_logger = "0.10.0"
 eyre = "0.6.8"
+itertools = "0.10.5"
 keyring = "2.0.2"
 log = { version = "0.4.17", features = ["serde"] }
 minijinja = "0.32.0"
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["serde_json", "json", "rustls", "rustls-native-certs", "rustls-pemfile", "rustls-tls", "tokio-rustls"], default-features = false }
+regex = "1.8.0"
 rpassword = "7.2.0"
 rusqlite = "0.29.0"
 serde = { version = "1.0.160", features = ["derive"] }
