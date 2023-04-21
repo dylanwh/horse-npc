@@ -5,12 +5,14 @@ use async_openai::types::{
 };
 use bimap::BiMap;
 use eyre::{ContextCompat, Result};
+use itertools::intersperse;
 use serenity::model::prelude::Message;
 use serenity::{
     model::{channel::Channel, prelude::Ready},
     prelude::*,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
 // use tiktoken_rs::async_openai::get_chat_completion_max_tokens;
 // use minijinja::EnvirVonment;
 
@@ -61,12 +63,10 @@ impl Handler {
     //     Ok(())
     // }
 
-    // it actually works out pretty good just leaving the discord references in the message,
-    // though I worry since chatgpt isn't good with long numbers it may mix up people eventually. That could actually be amusing though.
     #[allow(dead_code)]
-    async fn replace_user_mentions(&self, context: &Context, message: &Message) -> Result<String> {
+    async fn decode_user_mentions(&self, context: &Context, message: &Message) -> Result<String> {
         let mut content = message.content.clone();
-        let mentions = self.mentions.lock().await;
+        let mut mentions = self.mentions.lock().await;
         for mention in message.mentions.iter() {
             let user = mention.id.to_user(&context).await?;
             let mention = format!("<@{}>", user.id);
@@ -75,11 +75,73 @@ impl Handler {
             } else {
                 let guild = message.guild(&context).context("No guild found")?;
                 let member = guild.member(context, user.id).await?;
-                let nickname = member.nick.unwrap_or(user.name).to_owned();
+                let nickname = format!("@{}", member.nick.unwrap_or(user.name).to_owned());
                 content = content.replace(&mention.as_str(), &nickname);
+                mentions.insert(mention, nickname);
             }
         }
         Ok(content)
+    }
+
+    async fn decode_user_mentions_from_str<S>(
+        &self,
+        context: &Context,
+        message: &Message,
+        content: S,
+    ) -> Result<String>
+    where
+        S: AsRef<str>,
+    {
+        let re = regex::Regex::new(r"<@(\d+)>")?;
+        let mut mentions = self.mentions.lock().await;
+
+        // iterate over all regex matches
+        for caps in re.captures_iter(content.as_ref()) {
+            // get the user id
+            let Some(user_id) = caps.get(1).map(|m| m.as_str()) else { continue };
+            let user_id = user_id.parse::<u64>()?;
+            let mention = format!("<@{}>", user_id);
+            if mentions.contains_left(&mention) {
+                continue;
+            }
+            let user = context.http.get_user(user_id).await?;
+            let guild = message.guild(&context).context("No guild found")?;
+            let member = guild.member(context, user.id).await?;
+            let nickname = format!("@{}", member.nick.unwrap_or(user.name).to_owned());
+            mentions.insert(mention, nickname);
+        }
+
+        let result = re.replace_all(content.as_ref(), |caps: &regex::Captures| {
+            let user_id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_owned();
+            let user_id = user_id.parse::<u64>().unwrap_or(0);
+            let mention = format!("<@{}>", user_id);
+            mentions.get_by_left(&mention).cloned().unwrap_or(mention)
+        });
+
+        Ok(result.to_string())
+    }
+
+    async fn encode_user_mentions<S>(&self, content: S) -> Result<String>
+    where
+        S: AsRef<str>,
+    {
+        let mentions = self.mentions.lock().await;
+
+        let pattern = intersperse(
+            mentions.right_values().map(|s| regex::escape(s)),
+            "|".to_owned(),
+        )
+        .collect::<String>();
+
+        let re = regex::Regex::new(&pattern)?;
+        let result = re.replace_all(content.as_ref(), |caps: &regex::Captures| {
+            let nickname = caps.get(0).map(|m| m.as_str()).unwrap_or("").to_owned();
+            mentions
+                .get_by_right(&nickname)
+                .cloned()
+                .unwrap_or(nickname)
+        });
+        Ok(result.to_string())
     }
 
     async fn must_moderate<S>(&self, message: S) -> Result<bool>
@@ -106,7 +168,19 @@ impl Handler {
     ) -> Result<db::Conversation> {
         let channel = message.channel_id.to_channel(&context).await?;
         let name = match channel {
-            Channel::Guild(g) => format!("#{}", g.name),
+            Channel::Guild(g) => {
+                // determine if thread or regular channel
+                if let Some(parent) = g.parent_id {
+                    let parent = parent.to_channel(&context).await?;
+                    if let Channel::Guild(parent) = parent {
+                        format!("#{}:{}", parent.name, g.name)
+                    } else {
+                        format!("#{}", g.name)
+                    }
+                } else {
+                    format!("#{}", g.name)
+                }
+            }
             Channel::Private(p) => format!("{}", p.recipient.name),
             _ => format!("unknown"),
         };
@@ -152,16 +226,20 @@ impl Handler {
         .collect::<Vec<&str>>()
         .join("\n");
 
-        Ok(prompt.to_owned())
+        let prompt = self
+            .decode_user_mentions_from_str(context, &message, prompt)
+            .await?;
+        log::info!("system prompt: {}", prompt);
+        Ok(prompt)
     }
 
     async fn reply(
         &self,
         conversation: db::Conversation,
         system_prompt: String,
-        message: String,
+        content: String,
     ) -> Result<String> {
-        if self.must_moderate(&message).await? {
+        if self.must_moderate(&content).await? {
             return Ok(random_moderation_response());
         }
 
@@ -173,7 +251,7 @@ impl Handler {
         };
 
         self.schema
-            .add_message(conversation, db::Role::User, message)
+            .add_message(conversation, db::Role::User, content)
             .await?;
 
         let mut messages = self
@@ -237,14 +315,23 @@ impl EventHandler for Handler {
                 .await
                 .expect("Failed to get conversation");
             if let Ok(typing) = msg.channel_id.start_typing(&context.http) {
+                let content = msg.content.clone();
+                let content = self
+                    .decode_user_mentions(&context, &msg)
+                    .await
+                    .expect("decode_user_mentions");
                 let system_prompt = self
                     .current_system_prompt(&context, &msg)
                     .await
                     .expect("failed to get system prompt");
                 let reply = self
-                    .reply(conversation, system_prompt, msg.content.clone())
+                    .reply(conversation, system_prompt, content)
                     .await
                     .expect("Failed to reply");
+                let reply = self
+                    .encode_user_mentions(reply)
+                    .await
+                    .expect("encode_user_mentions");
                 log::info!("HorseNPC: {}", reply);
                 let _ = typing.stop();
                 match msg.channel_id.say(&context, reply).await {
@@ -311,6 +398,24 @@ mod tests {
     fn test_random_moderation_response() {
         let response = random_moderation_response();
         assert!(!response.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_encode_user_mentions() {
+        let handler = Handler::new().await.unwrap();
+        {
+            let mut mentions_map = handler.mentions.lock().await;
+            mentions_map.insert("@Alice".to_owned(), "<@1234>".to_owned());
+            mentions_map.insert("@Bob".to_owned(), "<@5678>".to_owned());
+            mentions_map.insert("@Charlie".to_owned(), "<@9012>".to_owned());
+        }
+
+        let content = "Hello @Alice, @Bob, and @Charlie!".to_owned();
+        let expected_result = "Hello <@1234>, <@5678>, and <@9012>!".to_owned();
+
+        let result = handler.encode_user_mentions(content).await.unwrap();
+
+        assert_eq!(result, expected_result);
     }
 
     #[cfg(interactive)]

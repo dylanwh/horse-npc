@@ -12,10 +12,12 @@ chrono = "0.4.24"
 clap = { version = "4.2.2", features = ["derive"] }
 env_logger = "0.10.0"
 eyre = "0.6.8"
+itertools = "0.10.5"
 keyring = "2.0.2"
 log = { version = "0.4.17", features = ["serde"] }
 minijinja = "0.32.0"
 rand = "0.8.5"
+regex = "1.8.0"
 reqwest = { version = "0.11.16", features = ["serde_json", "json"] }
 rpassword = "7.2.0"
 rusqlite = "0.29.0"
