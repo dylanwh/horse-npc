@@ -63,7 +63,6 @@ impl Handler {
     //     Ok(())
     // }
 
-    #[allow(dead_code)]
     async fn decode_user_mentions(&self, context: &Context, message: &Message) -> Result<String> {
         let mut content = message.content.clone();
         let mut mentions = self.mentions.lock().await;
@@ -206,7 +205,7 @@ impl Handler {
                     .as_ref()
                     .unwrap_or(&format!("anything related to {}", g.name))
             ),
-            Channel::Private(p) => format!("in a private channel with <@{}>", p.recipient.id),
+            Channel::Private(_) => "in a private channel".to_string(),
             _ => format!("You have no idea where you are"),
         };
         let my_id = context.cache.current_user_id();
@@ -327,7 +326,6 @@ impl EventHandler for Handler {
                 .await
                 .expect("Failed to get conversation");
             if let Ok(typing) = msg.channel_id.start_typing(&context.http) {
-                let content = msg.content.clone();
                 let content = self
                     .decode_user_mentions(&context, &msg)
                     .await
