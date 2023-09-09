@@ -1,36 +1,52 @@
+extern crate core;
+
 mod db;
 
 use async_openai::types::{
     ChatCompletionRequestMessage, CreateChatCompletionRequestArgs,
 };
 use bimap::BiMap;
-use eyre::{ContextCompat, Result};
+use eyre::{eyre, Result};
 use itertools::intersperse;
-use serenity::model::prelude::Message;
+use minijinja::{context, Environment, Source};
 use serenity::{
-    model::{channel::Channel, prelude::Ready},
-    prelude::*,
+    model::{
+        channel::Channel,
+        guild::Guild,
+        prelude::{Message, Ready},
+    },
+    prelude::{Context, EventHandler, GatewayIntents},
+    Client,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
+use unicase::UniCase;
 
 // use tiktoken_rs::async_openai::get_chat_completion_max_tokens;
-// use minijinja::EnvirVonment;
 
 const HORSE_MODERATION_RESPONSES: &str = include_str!("../moderation_responses.txt");
 
 struct Handler {
-    schema: db::Schema,
+    schema: Arc<db::Schema>,
     openai: Arc<async_openai::Client>,
-    mentions: Arc<Mutex<BiMap<String, String>>>,
+    mentions: Arc<Mutex<BiMap<String, UniCase<String>>>>,
     model: String,
     max_tokens: u16,
+    templates: Environment<'static>,
 }
 
 impl Handler {
-    async fn new() -> Result<Self> {
-        let schema = db::Schema::new(Some(PathBuf::from("horse.db"))).await?;
+    async fn new(db_path: Option<PathBuf>) -> Result<Self> {
+        let schema = Arc::new(db::Schema::new(db_path).await?);
         let openai = Arc::new(async_openai::Client::new().with_api_key(get_openai_key()?));
         let mentions = Arc::new(Mutex::new(BiMap::new()));
+
+        let mut templates: Environment = Environment::new();
+        let fetch_recv = Arc::new(std::sync::Mutex::new(fetch_recv));
+        let source = Source::with_loader(move |f| {
+            todo!();
+        });
+        templates.set_source(source);
 
         Ok(Self {
             schema,
@@ -38,6 +54,7 @@ impl Handler {
             mentions,
             model: "gpt-3.5-turbo".to_owned(),
             max_tokens: 256,
+            templates,
         })
     }
 
@@ -63,29 +80,10 @@ impl Handler {
     //     Ok(())
     // }
 
-    async fn decode_user_mentions(&self, context: &Context, message: &Message) -> Result<String> {
-        let mut content = message.content.clone();
-        let mut mentions = self.mentions.lock().await;
-        for mention in message.mentions.iter() {
-            let user = mention.id.to_user(&context).await?;
-            let mention = format!("<@{}>", user.id);
-            if let Some(nickname) = mentions.get_by_left(&mention) {
-                content = content.replace(&mention, nickname);
-            } else {
-                let guild = message.guild(&context).context("No guild found")?;
-                let member = guild.member(context, user.id).await?;
-                let nickname = format!("@{}", member.nick.unwrap_or(user.name).to_owned());
-                content = content.replace(&mention.as_str(), &nickname);
-                mentions.insert(mention, nickname);
-            }
-        }
-        Ok(content)
-    }
-
-    async fn decode_user_mentions_from_str<S>(
+    async fn decode_user_mentions<S>(
         &self,
         context: &Context,
-        message: &Message,
+        message: Option<&Message>,
         content: S,
     ) -> Result<String>
     where
@@ -104,17 +102,22 @@ impl Handler {
                 continue;
             }
             let user = context.http.get_user(user_id).await?;
-            let guild = message.guild(&context).context("No guild found")?;
+            let guild = self.get_guild(context, message).await?;
             let member = guild.member(context, user.id).await?;
             let nickname = format!("@{}", member.nick.unwrap_or(user.name).to_owned());
-            mentions.insert(mention, nickname);
+            mentions.insert(mention, UniCase::new(nickname));
         }
 
         let result = re.replace_all(content.as_ref(), |caps: &regex::Captures| {
             let user_id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_owned();
             let user_id = user_id.parse::<u64>().unwrap_or(0);
             let mention = format!("<@{}>", user_id);
-            mentions.get_by_left(&mention).cloned().unwrap_or(mention)
+
+            mentions
+                .get_by_left(&mention)
+                .cloned()
+                .map(|s| s.to_string())
+                .unwrap_or(mention.clone())
         });
 
         Ok(result.to_string())
@@ -134,11 +137,13 @@ impl Handler {
 
         let re = regex::Regex::new(&pattern)?;
         let result = re.replace_all(content.as_ref(), |caps: &regex::Captures| {
-            let nickname = caps.get(0).map(|m| m.as_str()).unwrap_or("").to_owned();
+            let nickname_string = caps.get(0).map(|m| m.as_str()).unwrap_or("").to_owned();
+            let nickname = UniCase::new(nickname_string.clone());
             mentions
                 .get_by_right(&nickname)
                 .cloned()
-                .unwrap_or(nickname)
+                .unwrap_or(nickname_string)
+                .to_string()
         });
         Ok(result.to_string())
     }
@@ -184,49 +189,51 @@ impl Handler {
             _ => format!("unknown"),
         };
 
-        Ok(self.schema.new_conversation(name).await?)
+        Ok(self.schema.find_conversation(name).await?)
+    }
+
+    async fn get_guild(&self, context: &Context, message: Option<&Message>) -> Result<Guild> {
+        if let Some(message) = message {
+            if let Some(guild) = message.guild(context) {
+                return Ok(guild);
+            }
+        }
+        let guilds = context.http.get_guilds(None, Some(1)).await?;
+        if guilds.is_empty() {
+            return Err(eyre!("No guilds found"));
+        }
+        let guild = guilds[0]
+            .id
+            .to_guild_cached(context)
+            .ok_or_else(|| eyre!("Guild not found"))?;
+
+        Ok(guild)
     }
 
     async fn current_system_prompt(&self, context: &Context, message: &Message) -> Result<String> {
         let now = chrono::Local::now();
-        let date = now.format("Today is %A, the %e of %B, %Y. The tine is %I:%M %p");
+        let date = now
+            .format("Today is %A, the %e of %B, %Y. The time is %I:%M %p")
+            .to_string();
         let user = message.author.id.to_user(&context).await?;
         let channel = message.channel_id.to_channel(&context).await?;
-        let discord_name = message
-            .guild_id
-            .and_then(|g| g.name(&context))
-            .unwrap_or_else(|| "something or other".to_string());
+        let server_name = message.guild_id.and_then(|g| g.name(&context));
 
-        let channel_info = match channel {
-            Channel::Guild(g) => format!(
-                r##"in a channel named {}. The topic is: "{}""##,
-                g.name,
-                g.topic
-                    .as_ref()
-                    .unwrap_or(&format!("anything related to {}", g.name))
-            ),
-            Channel::Private(_) => "in a private channel".to_string(),
-            _ => format!("You have no idea where you are"),
+        let (channel_name, channel_topic) = match channel {
+            Channel::Guild(g) => (Some(g.name), g.topic),
+            _ => (None, None),
         };
-        let my_id = context.cache.current_user_id();
-        let prompt = format!(
-            r#"
-            {}.
-            Your name is <@{}>.
-            You are a horse. You speak only in ridiculous horse puns.
-            You are on a discord server named {},
-            You are talking to <@{}> {}.
-        "#,
-            date, my_id, discord_name, user.id, channel_info
-        )
-        .trim()
-        .lines()
-        .map(|l| l.trim())
-        .collect::<Vec<&str>>()
-        .join("\n");
-
+        let template = self.templates.get_template("default_prompt")?;
+        let prompt = template.render(context!(
+            user_id => format!("<@{}>", user.id),
+            bot_id => format!("<@{}>", context.cache.current_user_id()),
+            date,
+            server_name,
+            channel_name,
+            channel_topic,
+        ))?;
         let prompt = self
-            .decode_user_mentions_from_str(context, &message, prompt)
+            .decode_user_mentions(context, Some(&message), prompt)
             .await?;
         log::info!("system prompt: {}", prompt);
         Ok(prompt)
@@ -316,7 +323,17 @@ impl EventHandler for Handler {
         if msg.author.bot {
             return;
         }
-        log::info!("Message: {}", msg.content);
+        let content = msg.content.clone();
+        if content.starts_with("show prompt") {
+            let prompt = self.current_system_prompt(&context, &msg).await.unwrap();
+            let prompt = self
+                .decode_user_mentions(&context, Some(&msg), prompt)
+                .await
+                .unwrap();
+            msg.channel_id.say(&context, prompt).await.unwrap();
+            return;
+        }
+
         let mentioned = msg.mentions_me(&context).await.unwrap_or(false);
         let dm = msg.is_private();
 
@@ -326,8 +343,9 @@ impl EventHandler for Handler {
                 .await
                 .expect("Failed to get conversation");
             if let Ok(typing) = msg.channel_id.start_typing(&context.http) {
+                let content = msg.content.clone();
                 let content = self
-                    .decode_user_mentions(&context, &msg)
+                    .decode_user_mentions(&context, Some(&msg), content)
                     .await
                     .expect("decode_user_mentions");
                 let system_prompt = self
@@ -357,7 +375,7 @@ impl EventHandler for Handler {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
@@ -370,7 +388,7 @@ async fn main() -> Result<()> {
         | GatewayIntents::GUILDS;
 
     let mut client = Client::builder(&get_discord_token()?, intents)
-        .event_handler(Handler::new().await?)
+        .event_handler(Handler::new(None).await?)
         .await?;
 
     log::info!("Starting client...");
@@ -411,22 +429,14 @@ mod tests {
         assert!(!response.is_empty());
     }
 
+
     #[tokio::test]
-    async fn test_encode_user_mentions() {
-        let handler = Handler::new().await.unwrap();
-        {
-            let mut mentions_map = handler.mentions.lock().await;
-            mentions_map.insert("@Alice".to_owned(), "<@1234>".to_owned());
-            mentions_map.insert("@Bob".to_owned(), "<@5678>".to_owned());
-            mentions_map.insert("@Charlie".to_owned(), "<@9012>".to_owned());
-        }
-
-        let content = "Hello @Alice, @Bob, and @Charlie!".to_owned();
-        let expected_result = "Hello <@1234>, <@5678>, and <@9012>!".to_owned();
-
-        let result = handler.encode_user_mentions(content).await.unwrap();
-
-        assert_eq!(result, expected_result);
+    async fn test_templates() {
+        let handler = Handler::new(None).await.unwrap();
+        handler.schema.set_template("test", "Hello {{name}}").await.unwrap();
+        let template = handler.templates.get_template("test").unwrap();
+        let result = template.render(context!(name =>  "Alice")).unwrap();
+        assert_eq!(result, "Hello Alice");
     }
 
     #[cfg(interactive)]

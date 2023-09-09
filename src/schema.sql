@@ -1,11 +1,19 @@
+
+CREATE TABLE IF NOT EXISTS template (
+    name     VARCHAR(255) NOT NULL UNIQUE,
+    readonly BOOLEAN NOT NULL DEFAULT FALSE,
+    content  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS conversation (
-    id     INTEGER PRIMARY KEY,
-    name   VARCHAR(255) NOT NULL UNIQUE
+    id       UNSIGNED INTEGER PRIMARY KEY,
+    name     VARCHAR(255) NOT NULL UNIQUE,
+    template VARCHAR(255) DEFAULT NULL REFERENCES template(name)
 );
 
 CREATE TABLE IF NOT EXISTS history (
-   id             INTEGER PRIMARY KEY,
-   conversation   INTEGER NOT NULL REFERENCES conversation(id),
-   role           INTEGER NOT NULL,
-   content        TEXT NOT NULL
+   id           UNSIGNED INTEGER PRIMARY KEY,
+   conversation UNSIGNED INTEGER NOT NULL REFERENCES conversation(id),
+   role         UNSIGNED INTEGER NOT NULL,
+   content      TEXT NOT NULL
 );
