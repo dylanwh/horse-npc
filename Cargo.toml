@@ -15,12 +15,13 @@ eyre = "0.6.8"
 itertools = "0.10.5"
 keyring = "2.0.2"
 log = { version = "0.4.17", features = ["serde"] }
-minijinja = "0.32.0"
+minijinja = { version = "0.32.0", features = ["source"] }
 rand = "0.8.5"
 regex = "1.8.0"
 reqwest = { version = "0.11.16", features = ["serde_json", "json"] }
 rpassword = "7.2.0"
 rusqlite = "0.29.0"
+rust-embed = { version = "6.6.1", features = ["tokio"] }
 serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
 serenity = { version = "0.11.5", default-features = false, features = [ "base64", "builder", "bytes", "cache", "chrono", "client", "command_attr", "dashmap", "flate2", "gateway", "http", "levenshtein", "model", "parking_lot", "rustls_backend", "static_assertions", "tokio", "typemap_rev", "utils", "uwl" ]}
@@ -29,3 +30,4 @@ tiktoken-rs = { version = "0.4.1", features = ["async-openai"] }
 tokio = { version = "1.27.0", features = ["full"] }
 tokio-rusqlite = "0.4.0"
 typed-builder = "0.14.0"
+unicase = "2.6.0"
