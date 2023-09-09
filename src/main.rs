@@ -1,6 +1,6 @@
 use crate::schema::{Message, Personality, Role, Schema};
 use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs,
+    ChatCompletionRequestMessage, CreateChatCompletionRequestArgs,
 };
 use eyre::{ContextCompat, Result};
 use serenity::{
@@ -123,6 +123,17 @@ impl Handler {
         Ok(prompt.to_owned())
     }
 
+    #[allow(dead_code, unused_variables)]
+    async fn get_channel_messages(&self, context: &Context, channel_id: u64) -> Result<Vec<String>> {
+        let channel = context
+                .http
+                .get_channel(channel_id)
+                .await?;
+        let messages = vec![];
+
+        Ok(messages)
+    }
+
     async fn reply(
         &self,
         personality: Personality,
@@ -194,8 +205,10 @@ impl EventHandler for Handler {
         if msg.author.bot {
             return;
         }
+        log::info!("Message: {}", msg.content);
         let mentioned = msg.mentions_me(&context).await.unwrap_or(false);
-        if mentioned {
+        let is_dm = msg.is_private();
+        if mentioned || is_dm {
             let personality = self
                 .personalities
                 .lock()
@@ -229,8 +242,8 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
     dotenv::dotenv().ok();
+    env_logger::init();
 
     log::info!("Starting up...");
 
