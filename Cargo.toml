@@ -9,6 +9,7 @@ edition = "2021"
 async-openai = "0.10.3"
 chrono = "0.4.24"
 clap = { version = "4.2.2", features = ["derive"] }
+dotenv = "0.15.0"
 env_logger = "0.10.0"
 eyre = "0.6.8"
 keyring = "2.0.2"

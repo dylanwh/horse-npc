@@ -230,6 +230,7 @@ impl EventHandler for Handler {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+    dotenv::dotenv().ok();
 
     log::info!("Starting up...");
 
