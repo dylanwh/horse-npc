@@ -1,0 +1,15 @@
+[{
+        "name": "react",
+        "description": "Add a discord emoji reaction to a message",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reaction_name": {
+                    "type": "string",
+                    "description": "the name of the emoji to react with, such as :horse:"
+                }
+            },
+            "required": ["reaction_name"]
+        }
+    }]
+

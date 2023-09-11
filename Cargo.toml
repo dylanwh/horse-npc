@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-openai = "0.10.3"
+async-openai = "*"
 bimap = { version = "0.6.3", features = ["serde"] }
 chrono = "0.4.24"
 clap = { version = "4.2.2", features = ["derive"] }
@@ -32,3 +32,5 @@ tokio = { version = "1.27.0", features = ["full"] }
 tokio-rusqlite = "0.4.0"
 typed-builder = "0.14.0"
 unicase = "2.6.0"
+async-trait = "0.1.73"
+futures = "0.3.28"
